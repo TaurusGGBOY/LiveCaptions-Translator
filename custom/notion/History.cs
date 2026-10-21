@@ -70,12 +70,17 @@ public static class HistoryView
             PropertyChangedEventHandler changed = (_, e) => { if (e.PropertyName == "DisplayLogCards") root.Dispatcher.BeginInvoke(Refresh); };
             root.Loaded += (_, _) => { if (root.DataContext is INotifyPropertyChanged n) { n.PropertyChanged -= changed; n.PropertyChanged += changed; } Refresh(); };
             root.Unloaded += (_, _) => { if (root.DataContext is INotifyPropertyChanged n) n.PropertyChanged -= changed; };
-            items.AddHandler(FrameworkElement.LoadedEvent, new RoutedEventHandler((_, e) => {
-                if (e.OriginalSource is not TextBlock old || old.Name is not ("OriginalCaptionLog" or "TranslatedCaptionLog")) return;
-                if (old.Parent is not ContentControl parent) return;
-                var box = new HistoryTextBox { Side = old.Name == "OriginalCaptionLog" ? "ja" : "zh", FontSize = old.FontSize, Foreground = old.Foreground };
-                parent.Content = box;
-            }));
+            var stack = new FrameworkElementFactory(typeof(StackPanel));
+            stack.SetValue(FrameworkElement.MarginProperty, new Thickness(0,0,0,8));
+            foreach (var (side, size) in new[] { ("ja", 12.0), ("zh", 16.0) })
+            {
+                var box = new FrameworkElementFactory(typeof(HistoryTextBox));
+                box.SetValue(HistoryTextBox.SideProperty, side); box.SetValue(Control.FontSizeProperty, size);
+                box.SetValue(Control.PaddingProperty, new Thickness(8,4,8,4));
+                box.SetBinding(Control.ForegroundProperty, new Binding("Foreground") { Source = items });
+                stack.AppendChild(box);
+            }
+            items.ItemTemplate = new DataTemplate { VisualTree = stack };
         }
         catch { }
     }

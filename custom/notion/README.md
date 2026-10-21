@@ -1,19 +1,61 @@
-# Windows Notion vocabulary extension
+# Windows 选词收藏到 Notion
 
-Work in progress. This branch is based on the retained Windows source revision
-`a6fee12757b15edbeef7c60f8895e0be694801e1`, not the newest upstream revision.
+## 使用
 
-The installed personalized executable contains additional changes not represented
-by that source tree. Delivery therefore uses a reproducible, narrowly scoped
-assembly patch against the existing executable. Its original resources and
-unrelated method bodies must remain intact. Do not deploy a normal upstream build
-over the personalized installation.
+主窗口日文／中文都是只读文本框。拖选后 Ctrl+C 或右键复制，右键“添加到 Notion 日语笔记”后台收藏。无选区时禁用收藏。选择期间两栏保持同一对原句／译文，后台翻译继续；关闭菜单、离开选区或按 Esc 后恢复最新配对结果。
 
-The extension will provide paired read-only caption selection, an independent
-durable FIFO queue, local Windows credential encryption, and official Notion API
-archiving. A remote write with an uncertain outcome is reconciled by a stable note
-identifier; it is never blindly re-posted. No credentials, personal configuration,
-caption history, or installed binaries belong in this repository.
+翻译历史页进入时加载一次，停留期间不因新翻译重载或滚动。离开后再次进入更新；主动翻页、搜索、刷新仍可操作。历史表格和主窗口历史卡片均支持选词。
 
-Initial implementation is incomplete and not yet built or tested. Build and
-acceptance instructions will be added with the completed implementation.
+中文选词带上对应日文原句，返回的日语词必须实际出现在原句中，否则标待核对。日文选词保留实际词形。收藏归档日由点击时北京时间决定；上传、重试、跨午夜不改变日期。
+
+每条笔记是独立 toggle，包含词条、语境释义、罗马音／假名／原形、原识别字幕与当时译文、明确标为AI生成的日常例句、收藏时间及核对说明。原字幕未经听音核实，不被模型改写覆盖。
+
+## 一次性授权
+
+1. 在 [Notion 连接管理](https://www.notion.so/profile/integrations) 创建个人内部连接，允许读取、插入和更新内容。
+2. 在目标父页 `••• → 添加连接` 中连接它。父页应为直播间页，不是某一天的日期页。
+3. 翻译器右键菜单打开“Notion 一次性设置”，确认父页面ID，在本机密码框输入连接令牌，再“保存并检查页面访问”。令牌不要放入聊天、源码或日志。
+
+凭据用 Windows DPAPI 当前用户加密，保存在 `%LOCALAPPDATA%\LiveCaptionsTranslator\Notion\token.dpapi`。同目录的 `queue` 包含个人字幕快照，`settings.json` 保存父页设置；均不上传Git。这是软件自己的授权，不复用Codex插件授权。
+
+首次设置仅检查读取权限。真实写入验收应先使用名称明确含“TEST”的独立父页，完成后切回正式父页。已排队任务固定原父页，不会因设置切换而改投其他页。
+
+## 队列与限制
+
+- 独立 HttpClient 使用现有本地桥接与模型，不改共享翻译请求对象。单个消费者按入队顺序处理，入队不等待网络锁。
+- 任务原子落盘；日期页查询支持分页。同一 Windows 用户的消费者独占锁防止并发建页。词条标题有固定 `LCT收藏:<id>`，恢复先回查标识，不重复追加。
+- 网络读失败及明确拒绝可以自动重试。写入超时／断线／5xx 的结果可能不明：只自动回查，不盲目重发。若最终远端确实未写入，该队首会保持待核对，后续词条也等待，需要人工确认后修复任务状态。当前没有强制重发按钮。
+- 锁不能阻止另一台机器或其他软件并发建页；检测到多个同名日期页会暂停提示。
+- AI释义、读音、例句均可能有误，统一标注待核对。连续子串检查不能证明语义对应必然正确。
+
+## 构建
+
+分支基于留存源码 `a6fee12757b15edbeef7c60f8895e0be694801e1`。`src/` 已接入相同功能，但现用安装版还有未完整体现在源码树中的历史定制，所以实际交付采用原安装EXE的扩展补丁。不要把普通上游构建覆盖现用安装。
+
+Windows需要 .NET 8 SDK、Node.js、ILRepack和原安装程序解包依赖目录。Patcher默认使用NuGet的Mono.Cecil 0.11.6，也可通过 `-CecilPath` 指定已有兼容DLL。
+
+```powershell
+dotnet build custom/notion/NotionExtension.csproj -c Release
+dotnet run --project custom/notion/Tests/Tests.csproj -c Release -- C:/tmp/codextmp/lct-notion-tests-new
+dotnet run --project custom/notion/ClipboardTests/ClipboardTests.csproj -c Release
+./custom/notion/build-personalized.ps1 -OriginalExe '<原EXE>' -DependencyDirectory '<原解包目录>' -ILRepack '<ILRepack.exe>'
+```
+
+测试每次使用新的空目录。剪贴板测试仅处理文本剪贴板，不打印其内容，结束后恢复。真实桥接测试需在测试程序输出目录本机放置现有 `setting.json`，运行 `Tests` 时在测试目录参数后加 `--live-enrichment`；配置不得提交。
+
+如需单独打开相同授权窗口，可运行测试程序并仅传 `--setup`。真实Notion验收传 `<全新测试目录> --live-notion <已授权父页ID>`；该显式操作会在父页下建立名称含TEST的测试子页，再在其内写入人工样例。不会切换软件正式父页配置。
+
+补丁只改6个接入方法：字幕页构造、翻译任务构造、完成发布、历史页构造、列表赋值和自动刷新回调。构建核对其余848个原方法体及原嵌入资源不变，保留457个原bundle条目并替换主DLL。新提取目录避免Windows复用旧DLL。
+
+## 验收记录（2026-10-21，北京时间）
+
+- macOS完成源码编辑、fork、commit和推送，没有在macOS运行WPF。
+- Windows扩展及补丁构建0警告／0错误；33项功能检查、6项真实剪贴板竞争／Unicode／取消检查通过。
+- 覆盖中日文快照、菜单禁用、冻结恢复、历史回收、列表延迟更新、已有／新日期页、FIFO、午夜、网络恢复、响应丢失、重启回查、未知写入不重发、并发消费者、分页和请求头。
+- 原Haiku桥接有限实测：日文“大丈夫”、中文“没关系”生成上下文笔记；不匹配的“苹果”标待核对。不是准确率评测。
+- 真实启动看到主字幕及原浮窗继续工作，系统字幕隐藏；历史页实际打开检查，交付DLL自动刷新回调已反编译核对为空。
+- 首次打包的程序集名称不匹配已修正；词条请求温度参数导致的400已修正。这些失败不算通过。
+- 软件独立Notion授权已完成并经只读权限检查；Windows DPAPI加密保存。真实Notion测试8项通过：3个测试词条、2个日期页、日期复用／创建、固定跨午夜日期、FIFO、六段详情、重放回查无重复。全部位于明确标注TEST的测试父页，正式日期页未写入测试词条。
+- 持续直播中的鼠标、右键、快捷键、滚动、重进历史页体验仍需最终复核；自动测试不替代完整手势验收。
+
+个人安装路径、备份和恢复操作见本机交付说明；本仓库不含凭据、个人历史和安装二进制。

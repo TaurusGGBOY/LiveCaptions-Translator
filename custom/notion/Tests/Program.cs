@@ -14,6 +14,8 @@ static class Program
     static void Check(bool condition, string name) { if (!condition) throw new Exception("FAIL " + name); Console.WriteLine("PASS " + name); passed++; }
     [STAThread] static void Main(string[] args)
     {
+        if (args.Length == 3 && args[1] == "--live-notion") { root=args[0]; LiveNotion(args[2]).GetAwaiter().GetResult(); return; }
+        if (args.Length == 1 && args[0] == "--setup") { new Application(); SetupWindow.ShowFor(null!); return; }
         if (args.Length == 2 && args[1] == "--live-enrichment") { root=args[0]; LiveEnrichment().GetAwaiter().GetResult(); return; }
         if (args.Length != 1) throw new ArgumentException("Pass an isolated test directory");
         root = args[0]; Directory.CreateDirectory(root);
@@ -60,8 +62,48 @@ static class Program
         HistoryView.SetItems(items, firstRows); HistoryView.Hold(items); HistoryView.SetItems(items,newRows);
         Check(ReferenceEquals(items.ItemsSource,firstRows),"history refresh deferred during interaction");
         HistoryView.Release(items);Check(ReferenceEquals(items.ItemsSource,newRows),"history latest list restored after interaction");
+        var cardsPage=new CardsPage(); HistoryView.AttachCards(cardsPage);
+        cardsPage.LogCardItems.ItemTemplate.Seal();
+        var card=(StackPanel)cardsPage.LogCardItems.ItemTemplate.LoadContent();
+        card.DataContext=new HistoryRow("大丈夫ですよ。", "没关系。");
+        var cardJa=(HistoryTextBox)card.Children[0];var cardZh=(HistoryTextBox)card.Children[1];cardJa.Refresh();cardZh.Refresh();
+        Check(cardJa.IsReadOnly&&cardZh.IsReadOnly&&cardJa.Text=="大丈夫ですよ。"&&cardZh.Text=="没关系。","main history cards instantiate paired selectable controls");
     }
     static JobStore Store(string name)=>new(Path.Combine(root,name));
+    static async Task LiveNotion(string parent)
+    {
+        Directory.CreateDirectory(root);
+        using var api=new NotionApi(Vault.Read(Path.Combine(Runtime.Root,"token.dpapi")));
+        const string title="【TEST】LiveCaptions 收藏验收（非正式笔记）";
+        var children=await api.Children(parent);
+        var matches=children.Where(b=>b["child_page"]?["title"]?.GetValue<string>()==title).ToList();
+        if(matches.Count>1)throw new Exception("Duplicate test roots; inspect manually");
+        var testParent=matches.Count==1?matches[0]["id"]!.GetValue<string>():await api.CreateDate(parent,title);
+        File.WriteAllText(Path.Combine(root,"test-page.txt"),testParent);
+        Console.WriteLine("TEST_PAGE https://www.notion.so/"+testParent.Replace("-",""));
+        var store=Store("live-queue");
+        if(!store.Jobs().Any())
+        {
+            foreach(var j in new[]{Job(),Job("没关系","zh"),Job(time:DateTimeOffset.Parse("2026-10-21T16:00:01Z"))})
+            { j.Parent=testParent; store.Add(j); }
+        }
+        var worker=new NoteWorker(store,api,Enrichment.Generate);
+        for(var i=0;i<3;i++) { await worker.Step(); await Task.Delay(500); }
+        var jobs=store.Jobs().ToList();
+        Check(jobs.Count==3&&jobs.All(j=>j.Phase=="done"),"live Notion three notes saved through independent authorization and existing bridge");
+        var dates=(await api.Children(testParent)).Where(b=>b["type"]?.GetValue<string>()=="child_page").ToList();
+        Check(dates.Count==2,"live date create/reuse and fixed Beijing midnight archive");
+        foreach(var date in dates)
+        {
+            var id=date["id"]!.GetValue<string>(); var blocks=await api.Children(id);
+            var expected=jobs.Where(j=>j.PageId==id).ToList();
+            Check(blocks.Count==expected.Count&&expected.Select((j,i)=>Blocks.Matches(blocks[i],j)).All(x=>x),"live FIFO and one toggle per note");
+            foreach(var block in blocks) Check((await api.Children(block["id"]!.GetValue<string>())).Count==6,"live toggle contains all six detail paragraphs");
+        }
+        var retry=jobs[0]; retry.Phase="appending";store.Save(retry);await worker.Step();
+        Check((await api.Children(retry.PageId!)).Count==2&&store.Jobs().First().Phase=="done","live replay reconciles existing marker without duplicate");
+        Console.WriteLine("LIVE_NOTION_COMPLETE "+passed+" checks; synthetic sample captions only, test root retained for review.");
+    }
     static async Task LiveEnrichment()
     {
         foreach(var j in new[]{Job(),Job("没关系","zh"),NoteJob.Capture(new(1,"今日は晴れです。","苹果手机。"),"苹果","zh",DateTimeOffset.UtcNow,"test")})
@@ -110,6 +152,7 @@ static class Program
     }
 }
 public record HistoryRow(string SourceText, string TranslatedText);
+public class CardsPage:ContentControl { public ItemsControl LogCardItems=new(); public CardsPage(){Content=LogCardItems;} }
 sealed class FakeApi:INotesApi
 {
     public bool Existing,FailRead,LoseAppend,DropAppend,LoseCreate,Delay,RejectAppend;
