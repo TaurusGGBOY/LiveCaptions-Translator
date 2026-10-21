@@ -15,6 +15,8 @@ static class Program
     [STAThread] static void Main(string[] args)
     {
         if (args.Length == 3 && args[1] == "--live-notion") { root=args[0]; LiveNotion(args[2]).GetAwaiter().GetResult(); return; }
+        if (args.Length == 1 && args[0] == "--verify-saved") { VerifySaved().GetAwaiter().GetResult(); return; }
+        if (args.Length == 1 && args[0] == "--diagnose-queue") { DiagnoseQueue().GetAwaiter().GetResult(); return; }
         if (args.Length == 1 && args[0] == "--setup") { new Application(); SetupWindow.ShowFor(null!); return; }
         if (args.Length == 2 && args[1] == "--live-enrichment") { root=args[0]; LiveEnrichment().GetAwaiter().GetResult(); return; }
         if (args.Length != 1) throw new ArgumentException("Pass an isolated test directory");
@@ -97,12 +99,28 @@ static class Program
         {
             var id=date["id"]!.GetValue<string>(); var blocks=await api.Children(id);
             var expected=jobs.Where(j=>j.PageId==id).ToList();
-            Check(blocks.Count==expected.Count&&expected.Select((j,i)=>Blocks.Matches(blocks[i],j)).All(x=>x),"live FIFO and one toggle per note");
-            foreach(var block in blocks) Check((await api.Children(block["id"]!.GetValue<string>())).Count==6,"live toggle contains all six detail paragraphs");
+            Check(blocks.Count==expected.Count&&expected.Select((j,i)=>Blocks.Matches(blocks[i],j)).All(x=>x),"live FIFO and one expanded callout per note");
+            foreach(var block in blocks) Check((await api.Children(block["id"]!.GetValue<string>())).Count==6,"live expanded callout contains all six detail paragraphs");
         }
         var retry=jobs[0]; retry.Phase="appending";store.Save(retry);await worker.Step();
         Check((await api.Children(retry.PageId!)).Count==2&&store.Jobs().First().Phase=="done","live replay reconciles existing marker without duplicate");
         Console.WriteLine("LIVE_NOTION_COMPLETE "+passed+" checks; synthetic sample captions only, test root retained for review.");
+    }
+    static async Task VerifySaved()
+    {
+        using var api=new NotionApi(Vault.Read(Path.Combine(Runtime.Root,"token.dpapi")));
+        foreach(var j in new JobStore(Path.Combine(Runtime.Root,"queue")).Jobs().Where(j=>j.Phase=="done"))
+        {
+            var matching=(await api.Children(j.PageId!)).Where(b=>Blocks.Matches(b,j)).ToList();
+            Check(matching.Count==1&&matching[0]["type"]?.GetValue<string>()=="callout","installed app note exists once as expanded callout");
+            Check((await api.Children(matching[0]["id"]!.GetValue<string>())).Count==6,"installed app saved all six detail paragraphs");
+        }
+    }
+    static async Task DiagnoseQueue()
+    {
+        var job=new JobStore(Path.Combine(Runtime.Root,"queue")).Jobs().First(j=>j.Phase!="done");
+        try { await Enrichment.Generate(job); Console.WriteLine("Enrichment succeeded"); }
+        catch(Exception e) { Console.WriteLine("Enrichment failure type: "+e.GetType().Name); if(e is HttpRequestException h)Console.WriteLine("HTTP status: "+h.StatusCode); }
     }
     static async Task LiveEnrichment()
     {
@@ -145,7 +163,9 @@ static class Program
         var s8=Store("rejected");s8.Add(Job());var a8=new FakeApi{Existing=true,RejectAppend=true};var w8=new NoteWorker(s8,a8,j=>Task.FromResult(Entry(j)));
         await w8.Step();Check(s8.Jobs().Single().Phase=="queued","definite rejection remains retryable");a8.RejectAppend=false;await w8.Step();Check(s8.Jobs().Single().Phase=="done","retry after definite rejection succeeds");
         var block=Blocks.Build(new NoteJob{Entry=Entry(Job()),Japanese="original ASR",Chinese="original translation",Selected="word",CollectedAt=DateTimeOffset.UtcNow});
-        Check(block["toggle"]!["children"]!.AsArray().Count==6&&block.ToJsonString().Contains("original ASR"),"one toggle contains ordered fields and original transcript");
+        var legacyJob=Job();var legacy=new JsonObject{["type"]="toggle",["toggle"]=new JsonObject{["rich_text"]=Blocks.Rich("old "+Blocks.Marker(legacyJob))}};
+        Check(Blocks.Matches(legacy,legacyJob),"legacy collapsed notes remain recognizable for deduplication");
+        Check(block["callout"]!["children"]!.AsArray().Count==6&&block.ToJsonString().Contains("original ASR"),"one expanded callout contains ordered fields and original transcript");
         var text=new string('日',2001)+"😀";Check(Blocks.Text(Blocks.Rich(text))==text,"long Unicode rich text chunking is lossless");
         var handler=new PagesHandler();using var real=new NotionApi("fake-test-token",handler);var children=await real.Children("test");
         Check(children.Count==2&&handler.Calls==2&&handler.HeaderOk,"official API pagination and authorization headers");
@@ -168,7 +188,7 @@ sealed class FakeApi:INotesApi
     {
         if(RejectAppend)throw new RejectedRequest(429);Appended++;
         if(DropAppend)throw new HttpRequestException();
-        blocks.Add(block);var title=Blocks.Text(block["toggle"]!["rich_text"]);Saved.Add(title[(title.IndexOf("LCT收藏:",StringComparison.Ordinal))..].TrimEnd('〕'));
+        blocks.Add(block);var title=Blocks.Text((block["callout"] ?? block["toggle"])!["rich_text"]);Saved.Add(title[(title.IndexOf("LCT收藏:",StringComparison.Ordinal))..].TrimEnd('〕'));
         if(LoseAppend){LoseAppend=false;throw new HttpRequestException();}return Task.CompletedTask;
     }
 }

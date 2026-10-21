@@ -131,7 +131,7 @@ public static class Blocks
     public static JsonObject Paragraph(string text) => new() { ["object"] = "block", ["type"] = "paragraph", ["paragraph"] = new JsonObject { ["rich_text"] = Rich(text) } };
     public static string Text(JsonNode? rich) => rich is JsonArray a ? string.Concat(a.Select(n => n?["plain_text"]?.GetValue<string>() ?? n?["text"]?["content"]?.GetValue<string>() ?? "")) : "";
     public static string Marker(NoteJob j) => "LCT收藏:" + j.Id;
-    public static bool Matches(JsonObject block, NoteJob j) => Text(block["toggle"]?["rich_text"]).Contains(Marker(j), StringComparison.Ordinal);
+    public static bool Matches(JsonObject block, NoteJob j) => Text((block["callout"] ?? block["toggle"])?["rich_text"]).Contains(Marker(j), StringComparison.Ordinal);
     public static JsonObject Build(NoteJob j)
     {
         var e = j.Entry ?? new JsonObject();
@@ -144,7 +144,7 @@ public static class Blocks
             Paragraph("日常例句（AI生成，非直播原话）：\n" + Get("exampleJa") + "\n" + Get("exampleZh")),
             Paragraph("收藏时间（北京时间）：" + j.CollectedAt.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd HH:mm:ss zzz")),
             Paragraph("选中" + (j.Side == "ja" ? "日文" : "中文") + "：" + j.Selected + "\n核对说明／修正建议（不替换原字幕）：" + Get("review")));
-        return new JsonObject { ["object"] = "block", ["type"] = "toggle", ["toggle"] = new JsonObject {
+        return new JsonObject { ["object"] = "block", ["type"] = "callout", ["callout"] = new JsonObject {
             ["rich_text"] = Rich(title + " 〔" + Marker(j) + "〕"), ["children"] = children } };
     }
 }
@@ -185,7 +185,7 @@ public sealed class NoteWorker
             job.Phase = "done"; job.Status = "已保存"; store.Save(job); return true;
         }
         catch (RejectedRequest e) { job.Status = e.Code is 401 or 403 or 404 ? "待重试：检查Notion授权和页面连接" : "待重试：Notion HTTP " + e.Code; store.Save(job); return false; }
-        catch { job.Status = job.Phase is "creating" or "appending" ? "写入结果不明，自动回查中" : "待重试：网络或词条服务暂不可用"; store.Save(job); return false; }
+        catch (Exception e) { job.Status = job.Phase is "creating" or "appending" ? "写入结果不明，自动回查中" : "待重试：词条整理／网络（" + e.GetType().Name + "）"; store.Save(job); return false; }
     }
 }
 public static class Enrichment
@@ -193,7 +193,12 @@ public static class Enrichment
     public static async Task<JsonObject> Generate(NoteJob job)
     {
         // Dedicated client/request. Never call the translator's shared static HttpClient.
-        var settingsPath = Path.Combine(AppContext.BaseDirectory, "setting.json");
+        // A merged single-file app may use the extraction directory as its base.
+        // Its mutable settings live beside the installed executable. Test hosts retain their own settings.
+        var executable = Environment.ProcessPath;
+        var directory = string.Equals(Path.GetFileNameWithoutExtension(executable), "LiveCaptionsTranslator", StringComparison.OrdinalIgnoreCase)
+            ? Path.GetDirectoryName(executable)! : AppContext.BaseDirectory;
+        var settingsPath = Path.Combine(directory, "setting.json");
         var s = JsonNode.Parse(await File.ReadAllTextAsync(settingsPath))!;
         var api = s["ApiName"]!.GetValue<string>();
         if (api != "OpenAI") throw new InvalidOperationException("Existing bridge configuration required");
