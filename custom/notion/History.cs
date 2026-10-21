@@ -122,10 +122,10 @@ public sealed class HistoryTextBox : TextBox
             try
             {
                 var job = Capture(DateTimeOffset.UtcNow, Runtime.Instance.Configuration.Parent);
-                if (string.IsNullOrEmpty(job.Parent)) { ToolTip = "请先完成Notion一次性设置"; return; }
+                if (string.IsNullOrEmpty(job.Parent)) { ToolTip = "请先完成Notion一次性设置"; Feedback.Show((string)ToolTip, true); return; }
                 await Runtime.Instance.Enqueue(job); ToolTip = "已加入收藏队列；主字幕窗口显示保存状态";
             }
-            catch { ToolTip = "收藏失败，请重新选择后重试"; }
+            catch { ToolTip = "收藏失败，请重新选择后重试"; Feedback.Show((string)ToolTip, true); }
         };
         var setup = new MenuItem { Header = "Notion 一次性设置…" }; setup.Click += (_, _) => SetupWindow.ShowFor(Window.GetWindow(this));
         menu.Items.Add(copy); menu.Items.Add(save); menu.Items.Add(new Separator()); menu.Items.Add(setup);

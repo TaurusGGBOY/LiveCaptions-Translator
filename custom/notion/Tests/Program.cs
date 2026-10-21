@@ -15,6 +15,7 @@ static class Program
     [STAThread] static void Main(string[] args)
     {
         if (args.Length == 3 && args[1] == "--live-notion") { root=args[0]; LiveNotion(args[2]).GetAwaiter().GetResult(); return; }
+        if (args.Length == 1 && args[0] == "--backfill-live-romaji") { BackfillRomaji().GetAwaiter().GetResult(); return; }
         if (args.Length == 1 && args[0] == "--verify-saved") { VerifySaved().GetAwaiter().GetResult(); return; }
         if (args.Length == 1 && args[0] == "--diagnose-queue") { DiagnoseQueue().GetAwaiter().GetResult(); return; }
         if (args.Length == 1 && args[0] == "--setup") { new Application(); SetupWindow.ShowFor(null!); return; }
@@ -25,7 +26,7 @@ static class Program
         Console.WriteLine($"TOTAL {passed} checks passed. No real Notion API calls.");
     }
     static NoteJob Job(string selected = "大丈夫", string side = "ja", DateTimeOffset? time = null) => NoteJob.Capture(new(1,"大丈夫ですよ。無理しないで。","没关系，不要勉强。"), selected, side, time ?? DateTimeOffset.Parse("2026-10-21T15:59:59Z"), "test-parent");
-    static JsonObject Entry(NoteJob _) => new() { ["term"]="大丈夫", ["meaning"]="没关系", ["romaji"]="daijoubu", ["kana"]="だいじょうぶ", ["dictionary"]="大丈夫", ["exampleJa"]="明日でも大丈夫です。", ["exampleZh"]="明天也可以。", ["review"]="AI整理，待核对" };
+    static JsonObject Entry(NoteJob _) => new() { ["term"]="大丈夫", ["meaning"]="没关系", ["romaji"]="daijoubu", ["kana"]="だいじょうぶ", ["dictionary"]="大丈夫", ["liveRomaji"]="Daijōbu desu yo. Muri shinaide.", ["exampleJa"]="明日でも大丈夫です。", ["exampleZh"]="明天也可以。", ["review"]="AI整理，待核对" };
     static void UI()
     {
         var window=new Window(); var grid=new StackPanel(); window.Content=grid;
@@ -106,6 +107,25 @@ static class Program
         Check((await api.Children(retry.PageId!)).Count==2&&store.Jobs().First().Phase=="done","live replay reconciles existing marker without duplicate");
         Console.WriteLine("LIVE_NOTION_COMPLETE "+passed+" checks; synthetic sample captions only, test root retained for review.");
     }
+    static async Task BackfillRomaji()
+    {
+        using var api=new NotionApi(Vault.Read(Path.Combine(Runtime.Root,"token.dpapi")));
+        var store=new JobStore(Path.Combine(Runtime.Root,"queue"));
+        using var gate=store.Acquire();
+        foreach(var job in store.Jobs().Where(j=>j.Phase=="done"))
+        {
+            var blocks=(await api.Children(job.PageId!)).Where(b=>Blocks.Matches(b,job)).ToList();
+            if(blocks.Count!=1)throw new Exception("Expected exactly one saved note");
+            var details=await api.Children(blocks[0]["id"]!.GetValue<string>());
+            var original=details.Single(b=>Blocks.Text(b["paragraph"]?["rich_text"]).StartsWith("直播原句（Windows自动识别，未经听音核实）：\n"+job.Japanese+"\n",StringComparison.Ordinal));
+            if(Blocks.Text(original["paragraph"]?["rich_text"]).Contains("原句罗马音（"))continue;
+            if(job.Entry?["liveRomaji"]==null) { var generated=await Enrichment.Generate(job);job.Entry!["liveRomaji"]=generated["liveRomaji"]!.GetValue<string>();store.Save(job); }
+            var updated=Blocks.Build(job)["callout"]!["children"]![2]!["paragraph"]!["rich_text"];
+            await api.UpdateParagraph(original["id"]!.GetValue<string>(),Blocks.Text(updated));
+            var check=await api.Children(blocks[0]["id"]!.GetValue<string>());
+            Check(check.Any(b=>Blocks.Text(b["paragraph"]?["rich_text"]).Contains("原句罗马音（")&&Blocks.Text(b["paragraph"]?["rich_text"]).Contains(job.Japanese)),"saved note gains full-sentence romaji without replacing original ASR");
+        }
+    }
     static async Task VerifySaved()
     {
         using var api=new NotionApi(Vault.Read(Path.Combine(Runtime.Root,"token.dpapi")));
@@ -132,6 +152,14 @@ static class Program
     }
     static async Task Core()
     {
+        var feedback=new FeedbackPolicy(); var failedJob=Job(); failedJob.Status="待重试";
+        Check(feedback.ForResult(failedJob)?.IsError==true,"failed save produces visible failure feedback");
+        Check(feedback.ForResult(failedJob)==null,"repeated retry failures do not spam feedback");
+        failedJob.Phase="done";
+        Check(feedback.ForResult(failedJob)?.Text.Contains("已保存到 Notion")==true,"retry success produces success feedback after failure");
+        Check(feedback.ForResult(failedJob)==null,"completed job only notifies once");
+        var uncertain=Job();uncertain.Phase="appending";
+        Check(feedback.ForResult(uncertain)?.Text.Contains("自动回查")==true,"uncertain write feedback does not claim automatic resubmission");
         var before=Job(); var after=Job(time:DateTimeOffset.Parse("2026-10-21T16:00:00Z"));
         Check(before.DateTitle=="2026年10月21日"&&after.DateTitle=="2026年10月22日","Beijing midnight uses capture time");
         var store=Store("existing");store.Add(before);var api=new FakeApi{Existing=true};
@@ -166,6 +194,7 @@ static class Program
         var legacyJob=Job();var legacy=new JsonObject{["type"]="toggle",["toggle"]=new JsonObject{["rich_text"]=Blocks.Rich("old "+Blocks.Marker(legacyJob))}};
         Check(Blocks.Matches(legacy,legacyJob),"legacy collapsed notes remain recognizable for deduplication");
         Check(block["callout"]!["children"]!.AsArray().Count==6&&block.ToJsonString().Contains("original ASR"),"one expanded callout contains ordered fields and original transcript");
+        Check(block.ToJsonString().Contains("Daijōbu",StringComparison.Ordinal)||Blocks.Text(block["callout"]!["children"]![2]!["paragraph"]!["rich_text"]).Contains("Daijōbu"),"live sentence romanization included beside untouched original");
         var text=new string('日',2001)+"😀";Check(Blocks.Text(Blocks.Rich(text))==text,"long Unicode rich text chunking is lossless");
         var handler=new PagesHandler();using var real=new NotionApi("fake-test-token",handler);var children=await real.Children("test");
         Check(children.Count==2&&handler.Calls==2&&handler.HeaderOk,"official API pagination and authorization headers");

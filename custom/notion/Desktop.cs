@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -160,12 +161,12 @@ public sealed class SelectionView
             try
             {
                 var job = Capture(box, side, DateTimeOffset.UtcNow, Runtime.Instance.Configuration.Parent);
-                if (string.IsNullOrWhiteSpace(job.Parent)) { status.Text = "请先在右键菜单中配置Notion"; return; }
+                if (string.IsNullOrWhiteSpace(job.Parent)) { status.Text = "请先在右键菜单中配置Notion"; Feedback.Show(status.Text, true); return; }
                 status.Text = "正在保存到本机队列";
                 await Runtime.Instance.Enqueue(job);
                 status.Text = "已加入收藏队列";
             }
-            catch { status.Text = "本机收藏失败，请重试（未报告保存成功）"; }
+            catch { status.Text = "本机收藏失败，请重新选择后重试"; Feedback.Show(status.Text, true); }
         };
         var setup = new MenuItem { Header = "Notion 一次性设置…" };
         setup.Click += (_, _) => { if (useService) SetupWindow.ShowFor(Window.GetWindow(owner)); };
@@ -186,6 +187,51 @@ public sealed class SelectionView
     }
 }
 
+public record FeedbackMessage(string Text, bool IsError);
+public sealed class FeedbackPolicy
+{
+    readonly HashSet<string> failures = new(), completed = new();
+    public static string Word(NoteJob job) { var word = job.Selected.Replace("\r", " ").Replace("\n", " "); return word.Length > 24 ? word[..24] + "…" : word; }
+    public FeedbackMessage? ForResult(NoteJob job)
+    {
+        if (job.Phase == "done") return completed.Add(job.Id) ? new("已保存到 Notion · " + job.DateTitle + "\n" + Word(job), false) : null;
+        if (!failures.Add(job.Id)) return null;
+        var detail = job.Phase is "creating" or "appending" ? "写入结果待核对，正在自动回查" :
+            job.Status.Contains("授权") ? "请检查 Notion 授权，任务已保留" :
+            job.Status.Contains("同名") ? "日期页重名，任务已保留待核对" : "暂未保存，已保留并自动重试";
+        return new(detail + "\n" + Word(job), true);
+    }
+}
+public static class Feedback
+{
+    static readonly Queue<FeedbackMessage> messages = new();
+    static Popup? popup;
+    static DispatcherTimer? timer;
+    public static void Show(string text, bool error = false)
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher == null || dispatcher.HasShutdownStarted) return;
+        dispatcher.BeginInvoke(() => { messages.Enqueue(new(text, error)); if (popup == null) Next(); });
+    }
+    static void Next()
+    {
+        if (messages.Count == 0) return;
+        var window = Application.Current?.MainWindow;
+        if (window == null || !window.IsVisible) { messages.Clear(); return; }
+        var message = messages.Dequeue();
+        var content = new TextBlock { Text = message.Text, Foreground = Brushes.White, FontSize = 13, TextWrapping = TextWrapping.Wrap, MaxWidth = Math.Max(180, Math.Min(380, window.ActualWidth - 50)) };
+        popup = new Popup { PlacementTarget = window, Placement = PlacementMode.Relative, HorizontalOffset = 20,
+            VerticalOffset = Math.Max(30, window.ActualHeight - 95), AllowsTransparency = true, StaysOpen = true,
+            Focusable = false, IsHitTestVisible = false,
+            Child = new Border { Background = new SolidColorBrush(message.IsError ? Color.FromRgb(133,65,28) : Color.FromRgb(35,87,69)),
+                CornerRadius = new CornerRadius(7), Padding = new Thickness(12,9,12,9), Child = content } };
+        popup.IsOpen = true;
+        timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(message.IsError ? 7 : 4) };
+        timer.Tick += (_, _) => { timer!.Stop(); popup!.IsOpen = false; popup = null; Next(); };
+        timer.Start();
+    }
+}
+
 public sealed class Runtime
 {
     public static readonly string Root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiveCaptionsTranslator", "Notion");
@@ -196,6 +242,7 @@ public sealed class Runtime
     public string Status { get; private set; } = "Notion未配置 · 右键设置";
     readonly object enqueueSync = new();
     Task enqueueTail = Task.CompletedTask;
+    readonly FeedbackPolicy feedback = new();
     Runtime()
     {
         try { Configuration = JsonSerializer.Deserialize<Settings>(File.ReadAllText(Path.Combine(Root, "settings.json"))) ?? new(); } catch { }
@@ -207,7 +254,7 @@ public sealed class Runtime
         {
             // Chain click handlers in invocation order even when the thread pool is busy.
             return enqueueTail = enqueueTail.ContinueWith(async _ => {
-                for (int i=0;;i++) { try { Store.Add(job); return; } catch (IOException) when(i<20) { await Task.Delay(25); } }
+                for (int i=0;;i++) { try { Store.Add(job); Feedback.Show(File.Exists(Path.Combine(Root, "token.dpapi")) ? "已加入收藏队列，正在处理 · " + FeedbackPolicy.Word(job) : "已保留在本机，请先完成 Notion 授权", !File.Exists(Path.Combine(Root, "token.dpapi"))); return; } catch (IOException) when(i<20) { await Task.Delay(25); } }
             }, TaskScheduler.Default).Unwrap();
         }
     }
@@ -219,6 +266,18 @@ public sealed class Runtime
         var path = Path.Combine(Root, "settings.json");
         File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(Configuration)); File.Move(path + ".tmp", path, true);
     }
+    void NotifyPending(string status)
+    {
+        try
+        {
+            var head = Store.Jobs().FirstOrDefault(j => j.Phase != "done");
+            if (head == null) return;
+            head.Status = status;
+            var message = feedback.ForResult(head);
+            if (message != null) Feedback.Show(message.Text, message.IsError);
+        }
+        catch { /* Reporting must never interfere with translation or discard queued work. */ }
+    }
     async Task Loop()
     {
         while (true)
@@ -226,17 +285,24 @@ public sealed class Runtime
             bool progressed = false;
             try
             {
-                if (!File.Exists(Path.Combine(Root, "token.dpapi"))) Status = "待授权 · 收藏保留在本机";
+                if (!File.Exists(Path.Combine(Root, "token.dpapi"))) { Status = "待授权 · 收藏保留在本机"; NotifyPending("请检查Notion授权"); }
                 else
                 {
                     using var api = new NotionApi(Vault.Read(Path.Combine(Root, "token.dpapi")));
+                    var processing = Store.Jobs().FirstOrDefault(j => j.Phase != "done");
                     progressed = await new NoteWorker(Store, api, Enrichment.Generate).Step();
+                    if (processing != null)
+                    {
+                        var result = Store.Jobs().First(j => j.Id == processing.Id);
+                        var message = feedback.ForResult(result);
+                        if (message != null) Feedback.Show(message.Text, message.IsError);
+                    }
                     var jobs = Store.Jobs().ToList(); var head = jobs.FirstOrDefault(j => j.Phase != "done");
                     Status = head == null ? (jobs.Count > 0 ? "已保存 · " + jobs.Count + "条" : "Notion已配置") : head.Status + " · 待处理" + jobs.Count(j => j.Phase != "done");
                 }
             }
-            catch (IOException) { Status = "收藏队列忙，稍后重试"; }
-            catch { Status = "待重试 · 请检查本机授权或队列"; }
+            catch (IOException) { Status = "收藏队列忙，稍后重试"; NotifyPending(Status); }
+            catch { Status = "待重试 · 请检查本机授权或队列"; NotifyPending(Status); }
             await Task.Delay(progressed ? 750 : 15000);
         }
     }
