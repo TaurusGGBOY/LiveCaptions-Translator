@@ -1,4 +1,4 @@
-﻿namespace LiveCaptionsTranslator.models
+namespace LiveCaptionsTranslator.models
 {
     public class TranslationTaskQueue
     {
@@ -40,6 +40,7 @@
             }
 
             output = translationTask.Task.Result;
+            LiveCaptionsNotion.Hooks.Publish(translationTask);
             var translatedText = output.Item1;
 
             // Log after translation.
@@ -62,6 +63,7 @@
             Task = worker(cts.Token);
             OriginalText = originalText;
             CTS = cts;
+            LiveCaptionsNotion.Hooks.Register(this);
         }
     }
 }

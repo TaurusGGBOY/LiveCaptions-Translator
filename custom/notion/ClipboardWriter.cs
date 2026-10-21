@@ -2,7 +2,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace LiveCaptionsTranslator.Utils;
+namespace LiveCaptionsNotion.Native;
 
 internal static class ClipboardWriter
 {

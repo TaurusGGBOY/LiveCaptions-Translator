@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Win32;
@@ -40,6 +40,7 @@ namespace LiveCaptionsTranslator
             };
 
             HistoryMaxRow.SelectionChanged += maxRow_SelectionChanged;
+            LiveCaptionsNotion.HistoryView.Attach(this);
         }
 
         private async void OnTranslationLogged()
@@ -181,7 +182,7 @@ namespace LiveCaptionsTranslator
 
             await Dispatcher.InvokeAsync(() =>
             {
-                HistoryDataGrid.ItemsSource = history;
+                LiveCaptionsNotion.HistoryView.SetItems(HistoryDataGrid, history);
                 PageNumber.Text = currentPage.ToString() + "/" + maxPage.ToString();
             });
         }

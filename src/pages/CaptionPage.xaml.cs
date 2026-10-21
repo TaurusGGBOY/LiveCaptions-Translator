@@ -1,4 +1,4 @@
-﻿using System.Windows;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 
@@ -31,6 +31,7 @@ namespace LiveCaptionsTranslator
 
             CollapseTranslatedCaption(Translator.Setting.MainWindow.CaptionLogEnabled);
             ApplyFontSizes();
+            LiveCaptionsNotion.Hooks.Attach(this);
         }
 
         private async void TextBlock_MouseLeftButtonDown(object sender, RoutedEventArgs e)
