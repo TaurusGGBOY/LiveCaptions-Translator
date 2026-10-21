@@ -113,6 +113,8 @@ public sealed class NotionApi : INotesApi, IDisposable
     }
     public async Task Append(string page, JsonObject block) => await Send(HttpMethod.Patch, $"blocks/{page}/children", new JsonObject { ["children"] = new JsonArray(block.DeepClone()) });
     public async Task UpdateParagraph(string id, string text) => await Send(HttpMethod.Patch, "blocks/" + id, new JsonObject { ["paragraph"] = new JsonObject { ["rich_text"] = Blocks.Rich(text) } });
+    public async Task UpdateCalloutTitle(string id, string text) => await Send(HttpMethod.Patch, "blocks/" + id, new JsonObject { ["callout"] = new JsonObject { ["rich_text"] = Blocks.Rich(text) } });
+    public async Task ArchiveBlock(string id) => await Send(HttpMethod.Patch, "blocks/" + id, new JsonObject { ["archived"] = true });
     public void Dispose() => client.Dispose();
 }
 public static class Blocks
@@ -132,21 +134,50 @@ public static class Blocks
     public static JsonObject Paragraph(string text) => new() { ["object"] = "block", ["type"] = "paragraph", ["paragraph"] = new JsonObject { ["rich_text"] = Rich(text) } };
     public static string Text(JsonNode? rich) => rich is JsonArray a ? string.Concat(a.Select(n => n?["plain_text"]?.GetValue<string>() ?? n?["text"]?["content"]?.GetValue<string>() ?? "")) : "";
     public static string Marker(NoteJob j) => "LCT收藏:" + j.Id;
-    public static bool Matches(JsonObject block, NoteJob j) => Text((block["callout"] ?? block["toggle"])?["rich_text"]).Contains(Marker(j), StringComparison.Ordinal);
+    public static bool Matches(JsonObject block, NoteJob j)
+    {
+        foreach (var type in new[] { "callout", "toggle", "paragraph" })
+        {
+            var body = block[type];
+            if (Text(body?["rich_text"]).Contains(Marker(j), StringComparison.Ordinal)) return true;
+            if (body?["children"] is JsonArray children && children.OfType<JsonObject>().Any(b => Matches(b,j))) return true;
+        }
+        return false;
+    }
+    public static async Task<List<JsonObject>> FindNotes(INotesApi api, string page, NoteJob job)
+    {
+        var found = new List<JsonObject>();
+        foreach(var block in await api.Children(page))
+        {
+            if (Matches(block,job)) { found.Add(block); continue; }
+            if (block["type"]?.GetValue<string>() != "callout" || block["id"] == null) continue;
+            var children = await api.Children(block["id"]!.GetValue<string>());
+            var match = children.Any(b=>Matches(b,job));
+            foreach(var toggle in children.Where(b=>b["type"]?.GetValue<string>()=="toggle"))
+                if (!match && toggle["id"] != null) match = (await api.Children(toggle["id"]!.GetValue<string>())).Any(b=>Matches(b,job));
+            if(match) found.Add(block);
+        }
+        return found;
+    }
     public static JsonObject Build(NoteJob j)
     {
         var e = j.Entry ?? new JsonObject();
         string Get(string key) => e[key]?.GetValue<string>() ?? "待核对";
         var title = Get("term");
         var children = new JsonArray(
-            Paragraph("中文释义（AI整理，待核对）：" + Get("meaning")),
+            Paragraph("中文释义：" + Get("meaning")),
             Paragraph("罗马音：" + Get("romaji") + "；假名：" + Get("kana") + "；词典原形：" + Get("dictionary")),
-            Paragraph("直播原句（Windows自动识别，未经听音核实）：\n" + j.Japanese + "\n原句罗马音（AI按识别字幕生成，待核对）：" + Get("liveRomaji") + "\n当时译文：" + j.Chinese),
-            Paragraph("日常例句（AI生成，非直播原话）：\n" + Get("exampleJa") + "\n" + Get("exampleZh")),
-            Paragraph("收藏时间（北京时间）：" + j.CollectedAt.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd HH:mm:ss zzz")),
-            Paragraph("选中" + (j.Side == "ja" ? "日文" : "中文") + "：" + j.Selected + "\n核对说明／修正建议（不替换原字幕）：" + Get("review")));
+            Paragraph("直播原句（识别字幕）：\n" + j.Japanese + "\n原句罗马音：" + Get("liveRomaji") + "\n当时译文：" + j.Chinese),
+            Paragraph("日常例句（AI生成）：\n" + Get("exampleJa") + "\n" + Get("exampleZh")),
+            new JsonObject { ["object"]="block", ["type"]="toggle", ["toggle"]=new JsonObject {
+                ["rich_text"]=Rich("记录详情"), ["children"]=new JsonArray(
+                    Paragraph("收藏时间（北京时间）：" + j.CollectedAt.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd HH:mm:ss zzz")),
+                    Paragraph("选中" + (j.Side == "ja" ? "日文" : "中文") + "：" + j.Selected),
+                    Paragraph("核对说明／修正建议：" + Get("review")),
+                    Paragraph("来源与可用性：直播原句来自Windows识别字幕，未经听音核实；释义、读音与日常例句由AI整理，可能有误。修正建议不替换原字幕。"),
+                    Paragraph(Marker(j))) } });
         return new JsonObject { ["object"] = "block", ["type"] = "callout", ["callout"] = new JsonObject {
-            ["rich_text"] = Rich(title + " 〔" + Marker(j) + "〕"), ["children"] = children } };
+            ["rich_text"] = Rich(title), ["children"] = children } };
     }
 }
 public sealed class NoteWorker
@@ -177,8 +208,8 @@ public sealed class NoteWorker
                     job.Phase = "queued"; store.Save(job);
                 }
             }
-            var blocks = await api.Children(job.PageId);
-            if (blocks.Any(b => Blocks.Matches(b, job))) { job.Phase = "done"; job.Status = "已保存"; store.Save(job); return true; }
+            var blocks = await Blocks.FindNotes(api, job.PageId, job);
+            if (blocks.Count > 0) { job.Phase = "done"; job.Status = "已保存"; store.Save(job); return true; }
             if (job.Phase == "appending") { job.Status = "追加结果待核对；自动回查中"; store.Save(job); return false; }
             job.Phase = "appending"; job.Status = "正在保存"; store.Save(job);
             try { await api.Append(job.PageId, Blocks.Build(job)); }

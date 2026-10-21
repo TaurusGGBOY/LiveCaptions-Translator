@@ -15,6 +15,7 @@ static class Program
     [STAThread] static void Main(string[] args)
     {
         if (args.Length == 3 && args[1] == "--live-notion") { root=args[0]; LiveNotion(args[2]).GetAwaiter().GetResult(); return; }
+        if (args.Length == 1 && args[0] == "--study-layout") { StudyLayout().GetAwaiter().GetResult(); return; }
         if (args.Length == 1 && args[0] == "--backfill-live-romaji") { BackfillRomaji().GetAwaiter().GetResult(); return; }
         if (args.Length == 1 && args[0] == "--verify-saved") { VerifySaved().GetAwaiter().GetResult(); return; }
         if (args.Length == 1 && args[0] == "--diagnose-queue") { DiagnoseQueue().GetAwaiter().GetResult(); return; }
@@ -100,12 +101,42 @@ static class Program
         {
             var id=date["id"]!.GetValue<string>(); var blocks=await api.Children(id);
             var expected=jobs.Where(j=>j.PageId==id).ToList();
-            Check(blocks.Count==expected.Count&&expected.Select((j,i)=>Blocks.Matches(blocks[i],j)).All(x=>x),"live FIFO and one expanded callout per note");
-            foreach(var block in blocks) Check((await api.Children(block["id"]!.GetValue<string>())).Count==6,"live expanded callout contains all six detail paragraphs");
+            var ordered=true; for(int i=0;i<expected.Count;i++){var found=await Blocks.FindNotes(api,id,expected[i]);ordered &= found.Count==1&&found[0]["id"]!.GetValue<string>()==blocks[i]["id"]!.GetValue<string>();}
+            Check(blocks.Count==expected.Count&&ordered,"live FIFO and one expanded callout per note");
+            foreach(var block in blocks) Check((await api.Children(block["id"]!.GetValue<string>())).Count==5,"live expanded callout contains four study sections and a details toggle");
         }
         var retry=jobs[0]; retry.Phase="appending";store.Save(retry);await worker.Step();
         Check((await api.Children(retry.PageId!)).Count==2&&store.Jobs().First().Phase=="done","live replay reconciles existing marker without duplicate");
         Console.WriteLine("LIVE_NOTION_COMPLETE "+passed+" checks; synthetic sample captions only, test root retained for review.");
+    }
+    static async Task StudyLayout()
+    {
+        using var api=new NotionApi(Vault.Read(Path.Combine(Runtime.Root,"token.dpapi")));
+        // Explicit test mode: first validate the exact new nesting on a TEST parent.
+        var settings=System.Text.Json.JsonSerializer.Deserialize<Settings>(File.ReadAllText(Path.Combine(Runtime.Root,"settings.json")))!;
+        var parent=(await api.Children(settings.Parent)).Single(b=>b["child_page"]?["title"]?.GetValue<string>()=="【TEST】LiveCaptions 收藏验收（非正式笔记）")["id"]!.GetValue<string>();
+        var test=Job();test.Entry=Entry(test);test.Parent=parent;
+        var state=Path.Combine(Runtime.Root,"study-layout-test.json");
+        if(File.Exists(state))test=System.Text.Json.JsonSerializer.Deserialize<NoteJob>(File.ReadAllText(state))!;
+        else {File.WriteAllText(state,System.Text.Json.JsonSerializer.Serialize(test));await api.Append(parent,Blocks.Build(test));}
+        var testBlocks=await Blocks.FindNotes(api,parent,test);
+        Check(testBlocks.Count==1,"real Notion accepts study paragraphs plus nested collapsed details");
+        var testChildren=await api.Children(testBlocks[0]["id"]!.GetValue<string>());
+        Check(testChildren.Count==5&&testChildren[4]["type"]!.GetValue<string>()=="toggle","four visible study sections and one details toggle");
+        Check((await api.Children(testChildren[4]["id"]!.GetValue<string>())).Count==5,"all record metadata remains inside details");
+        var store=new JobStore(Path.Combine(Runtime.Root,"queue")); using var gate=store.Acquire();
+        foreach(var job in store.Jobs().Where(j=>j.Phase=="done"))
+        {
+            var matches=await Blocks.FindNotes(api,job.PageId!,job);if(matches.Count!=1)throw new Exception("Expected exactly one original note");
+            var id=matches[0]["id"]!.GetValue<string>();var old=await api.Children(id);
+            var newChildren=Blocks.Build(job)["callout"]!["children"]!.AsArray();
+            if(old.Count<4)throw new Exception("Unexpected note shape");
+            for(int i=0;i<4;i++) {if(old[i]["type"]!.GetValue<string>()!="paragraph")throw new Exception("Unexpected note content");await api.UpdateParagraph(old[i]["id"]!.GetValue<string>(),Blocks.Text(newChildren[i]!["paragraph"]!["rich_text"]));}
+            if(!old.Any(b=>b["type"]?.GetValue<string>()=="toggle"&&Blocks.Text(b["toggle"]?["rich_text"])=="记录详情"))await api.Append(id,newChildren[4]!.AsObject());
+            foreach(var extra in old.Skip(4).Where(b=>b["type"]?.GetValue<string>()=="paragraph"))await api.ArchiveBlock(extra["id"]!.GetValue<string>());
+            await api.UpdateCalloutTitle(id,Blocks.Text(Blocks.Build(job)["callout"]!["rich_text"]));
+            Check((await Blocks.FindNotes(api,job.PageId!,job)).Count==1,"existing note reorganized and retry identity preserved");
+        }
     }
     static async Task BackfillRomaji()
     {
@@ -114,16 +145,16 @@ static class Program
         using var gate=store.Acquire();
         foreach(var job in store.Jobs().Where(j=>j.Phase=="done"))
         {
-            var blocks=(await api.Children(job.PageId!)).Where(b=>Blocks.Matches(b,job)).ToList();
+            var blocks=await Blocks.FindNotes(api,job.PageId!,job);
             if(blocks.Count!=1)throw new Exception("Expected exactly one saved note");
             var details=await api.Children(blocks[0]["id"]!.GetValue<string>());
-            var original=details.Single(b=>Blocks.Text(b["paragraph"]?["rich_text"]).StartsWith("直播原句（Windows自动识别，未经听音核实）：\n"+job.Japanese+"\n",StringComparison.Ordinal));
-            if(Blocks.Text(original["paragraph"]?["rich_text"]).Contains("原句罗马音（"))continue;
+            var original=details.Single(b=>Blocks.Text(b["paragraph"]?["rich_text"]).StartsWith("直播原句（识别字幕）：\n"+job.Japanese+"\n",StringComparison.Ordinal));
+            if(Blocks.Text(original["paragraph"]?["rich_text"]).Contains("原句罗马音"))continue;
             if(job.Entry?["liveRomaji"]==null) { var generated=await Enrichment.Generate(job);job.Entry!["liveRomaji"]=generated["liveRomaji"]!.GetValue<string>();store.Save(job); }
             var updated=Blocks.Build(job)["callout"]!["children"]![2]!["paragraph"]!["rich_text"];
             await api.UpdateParagraph(original["id"]!.GetValue<string>(),Blocks.Text(updated));
             var check=await api.Children(blocks[0]["id"]!.GetValue<string>());
-            Check(check.Any(b=>Blocks.Text(b["paragraph"]?["rich_text"]).Contains("原句罗马音（")&&Blocks.Text(b["paragraph"]?["rich_text"]).Contains(job.Japanese)),"saved note gains full-sentence romaji without replacing original ASR");
+            Check(check.Any(b=>Blocks.Text(b["paragraph"]?["rich_text"]).Contains("原句罗马音")&&Blocks.Text(b["paragraph"]?["rich_text"]).Contains(job.Japanese)),"saved note gains full-sentence romaji without replacing original ASR");
         }
     }
     static async Task VerifySaved()
@@ -131,9 +162,9 @@ static class Program
         using var api=new NotionApi(Vault.Read(Path.Combine(Runtime.Root,"token.dpapi")));
         foreach(var j in new JobStore(Path.Combine(Runtime.Root,"queue")).Jobs().Where(j=>j.Phase=="done"))
         {
-            var matching=(await api.Children(j.PageId!)).Where(b=>Blocks.Matches(b,j)).ToList();
+            var matching=await Blocks.FindNotes(api,j.PageId!,j);
             Check(matching.Count==1&&matching[0]["type"]?.GetValue<string>()=="callout","installed app note exists once as expanded callout");
-            Check((await api.Children(matching[0]["id"]!.GetValue<string>())).Count==6,"installed app saved all six detail paragraphs");
+            Check((await api.Children(matching[0]["id"]!.GetValue<string>())).Count==5,"installed app saved study content and collapsed record details");
         }
     }
     static async Task DiagnoseQueue()
@@ -193,7 +224,9 @@ static class Program
         var block=Blocks.Build(new NoteJob{Entry=Entry(Job()),Japanese="original ASR",Chinese="original translation",Selected="word",CollectedAt=DateTimeOffset.UtcNow});
         var legacyJob=Job();var legacy=new JsonObject{["type"]="toggle",["toggle"]=new JsonObject{["rich_text"]=Blocks.Rich("old "+Blocks.Marker(legacyJob))}};
         Check(Blocks.Matches(legacy,legacyJob),"legacy collapsed notes remain recognizable for deduplication");
-        Check(block["callout"]!["children"]!.AsArray().Count==6&&block.ToJsonString().Contains("original ASR"),"one expanded callout contains ordered fields and original transcript");
+        Check(block["callout"]!["children"]!.AsArray().Count==5&&block.ToJsonString().Contains("original ASR"),"one expanded callout contains ordered fields and original transcript");
+        Check(Blocks.Text(block["callout"]!["rich_text"])=="大丈夫" && block["callout"]!["children"]![4]!["type"]!.GetValue<string>()=="toggle","study content visible and record details collapsed without title identifiers");
+        Check(Blocks.Matches(Blocks.Build(legacyJob),legacyJob),"nested hidden marker remains detectable");
         Check(block.ToJsonString().Contains("Daijōbu",StringComparison.Ordinal)||Blocks.Text(block["callout"]!["children"]![2]!["paragraph"]!["rich_text"]).Contains("Daijōbu"),"live sentence romanization included beside untouched original");
         var text=new string('日',2001)+"😀";Check(Blocks.Text(Blocks.Rich(text))==text,"long Unicode rich text chunking is lossless");
         var handler=new PagesHandler();using var real=new NotionApi("fake-test-token",handler);var children=await real.Children("test");
@@ -217,7 +250,7 @@ sealed class FakeApi:INotesApi
     {
         if(RejectAppend)throw new RejectedRequest(429);Appended++;
         if(DropAppend)throw new HttpRequestException();
-        blocks.Add(block);var title=Blocks.Text((block["callout"] ?? block["toggle"])!["rich_text"]);Saved.Add(title[(title.IndexOf("LCT收藏:",StringComparison.Ordinal))..].TrimEnd('〕'));
+        blocks.Add(block);var title=Blocks.Text(block["callout"]?["children"]?[4]?["toggle"]?["children"]?[4]?["paragraph"]?["rich_text"]);Saved.Add(title[(title.IndexOf("LCT收藏:",StringComparison.Ordinal))..].TrimEnd('〕'));
         if(LoseAppend){LoseAppend=false;throw new HttpRequestException();}return Task.CompletedTask;
     }
 }
