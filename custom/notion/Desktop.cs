@@ -143,7 +143,7 @@ public sealed class SelectionView
         old.Visibility = Visibility.Collapsed; grid.Children.Add(old); grid.Children.Add(box);
         if (side == "zh") { Grid.SetRow(status, 1); grid.Children.Add(status); }
         box.PreviewMouseLeftButtonDown += (_, _) => Freeze();
-        box.PreviewMouseRightButtonDown += (_, e) => { Freeze(); if (box.SelectionLength > 0) e.Handled = true; };
+        box.PreviewMouseRightButtonDown += (_, e) => { Freeze();  };
         box.PreviewMouseLeftButtonUp += (_, _) => owner.Dispatcher.BeginInvoke(() => { if (!menuOpen && box.SelectionLength == 0) Resume(); });
         box.PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { Resume(); e.Handled = true; } else Freeze(); };
         box.SelectionChanged += (_, _) => { if (!updating && box.SelectionLength > 0) Freeze(); };

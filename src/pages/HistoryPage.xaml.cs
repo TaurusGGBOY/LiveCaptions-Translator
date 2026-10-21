@@ -43,9 +43,10 @@ namespace LiveCaptionsTranslator
             LiveCaptionsNotion.HistoryView.Attach(this);
         }
 
-        private async void OnTranslationLogged()
+        private void OnTranslationLogged()
         {
-            await LoadHistory();
+            // Keep the entered history page as a stable snapshot. New translations
+            // are still logged; Loaded refreshes the view on the next visit.
         }
 
         private async void PageDown_click(object sender, RoutedEventArgs e)

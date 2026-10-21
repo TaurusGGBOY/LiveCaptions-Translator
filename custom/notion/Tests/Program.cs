@@ -30,12 +30,17 @@ static class Program
         var view=new SelectionView(window,ja,zh,false);
         view.Receive(new(1,"大丈夫ですよ。","没关系。"));
         Check(view.Japanese.IsReadOnly && view.Chinese.IsReadOnly,"both captions read-only");
+        view.Japanese.ContextMenu.RaiseEvent(new RoutedEventArgs(ContextMenu.OpenedEvent));
+        Check(!((MenuItem)view.Japanese.ContextMenu.Items[1]).IsEnabled,"empty-selection context menu disables Notion action");
+        view.Japanese.ContextMenu.RaiseEvent(new RoutedEventArgs(ContextMenu.ClosedEvent));view.Resume();
         view.Japanese.Select(0,3);
+        view.Japanese.ContextMenu.RaiseEvent(new RoutedEventArgs(ContextMenu.OpenedEvent));
+        Check(((MenuItem)view.Japanese.ContextMenu.Items[1]).IsEnabled,"selected-text context menu enables Notion action");
         view.Receive(new(2,"今日は晴れです。","今天晴天。"));
         Check(view.Frozen && view.Japanese.SelectedText=="大丈夫" && view.Chinese.Text=="没关系。","refresh preserves Japanese selection and paired Chinese");
         var capture=view.Capture(view.Japanese,"ja",DateTimeOffset.UtcNow,"test");
         Check(capture.Japanese=="大丈夫ですよ。"&&capture.Chinese=="没关系。","Japanese capture uses frozen pair");
-        view.Resume(); Check(view.Japanese.Text=="今日は晴れです。"&&!view.Frozen,"resume displays latest pair");
+        view.Japanese.ContextMenu.RaiseEvent(new RoutedEventArgs(ContextMenu.ClosedEvent));view.Resume(); Check(view.Japanese.Text=="今日は晴れです。"&&!view.Frozen,"resume displays latest pair");
         view.Chinese.Select(2,2); view.Receive(new(3,"またね。","再见。"));
         var chinese=view.Capture(view.Chinese,"zh",DateTimeOffset.UtcNow,"test");
         Check(chinese.Selected=="晴天"&&chinese.Japanese=="今日は晴れです。","Chinese selection carries exact Japanese context");

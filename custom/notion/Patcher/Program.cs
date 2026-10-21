@@ -22,6 +22,11 @@ void BeforeReturns(string typeName, string methodName, string hookName)
 BeforeReturns("LiveCaptionsTranslator.CaptionPage", ".ctor", "Attach");
 BeforeReturns("LiveCaptionsTranslator.models.TranslationTask", ".ctor", "Register");
 BeforeReturns("LiveCaptionsTranslator.HistoryPage", ".ctor", "AttachHistory");
+// The history page is a visit-scoped snapshot. The original logging subscription
+// may remain, but incoming translations must not reload/scroll the visible list.
+var logged = module.Types.Single(t => t.FullName == "LiveCaptionsTranslator.HistoryPage").Methods.Single(m => m.Name == "OnTranslationLogged");
+logged.CustomAttributes.Clear(); logged.Body = new MethodBody(logged);
+logged.Body.GetILProcessor().Append(Instruction.Create(OpCodes.Ret)); changed.Add(logged.FullName);
 var historySetter = module.Types.Single(t => t.FullName == "LiveCaptionsNotion.HistoryView").Methods.Single(m => m.Name == "SetItems");
 var historyRefresh = All(module.Types).Where(t => t.FullName.StartsWith("LiveCaptionsTranslator.HistoryPage"))
     .SelectMany(t => t.Methods).Single(m => m.HasBody && m.Name.Contains("<LoadHistory>") && m.Body.Instructions.Any(i => i.Operand is MethodReference r && r.Name == "set_ItemsSource"));

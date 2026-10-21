@@ -35,6 +35,15 @@ public static class HistoryView
         {
             var grid = (DataGrid)page.GetType().GetField("HistoryDataGrid", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(page)!;
             Configure(grid);
+            if (grid.Parent is Grid layout)
+            {
+                var status = new TextBlock { FontSize = 11, Margin = new Thickness(0,4,0,0), Opacity = .8 };
+                layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                Grid.SetRow(status, layout.RowDefinitions.Count - 1); layout.Children.Add(status);
+                var timer = new System.Windows.Threading.DispatcherTimer(TimeSpan.FromSeconds(1), System.Windows.Threading.DispatcherPriority.Background,
+                    (_, _) => status.Text = "历史快照 · 重新进入更新  |  " + Runtime.Instance.Status, grid.Dispatcher);
+                grid.Loaded += (_, _) => timer.Start(); grid.Unloaded += (_, _) => timer.Stop();
+            }
         }
         catch { }
     }
@@ -89,13 +98,14 @@ public sealed class HistoryTextBox : TextBox
     {
         IsReadOnly = true; IsReadOnlyCaretVisible = true; TextWrapping = TextWrapping.Wrap;
         BorderThickness = new Thickness(0); Background = Brushes.Transparent; Padding = new Thickness(2);
+        SetBinding(ForegroundProperty, new Binding("Foreground") { RelativeSource = new RelativeSource(RelativeSourceMode.FindAncestor, typeof(DataGrid), 1) });
         ToolTip = "历史字幕：拖选词语，右键添加到Notion；Esc结束选择";
         DataContextChanged += (_, _) => { if (!frozen) Refresh(); };
         Loaded += (_, _) => Refresh();
         Unloaded += (_, _) => { if (!menuOpen) End(); };
         PreviewMouseLeftButtonDown += (_, _) => Begin();
         PreviewMouseLeftButtonUp += (_, _) => Dispatcher.BeginInvoke(() => { if (SelectionLength == 0 && !menuOpen) End(); });
-        PreviewMouseRightButtonDown += (_, e) => { Begin(); if (SelectionLength > 0) e.Handled = true; };
+        PreviewMouseRightButtonDown += (_, e) => { Begin();  };
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { End(); e.Handled = true; } else Begin(); };
         SelectionChanged += (_, _) => { if (!updating && SelectionLength > 0) Begin(); };
         LostKeyboardFocus += (_, _) => Dispatcher.BeginInvoke(() => { if (!menuOpen) End(); });
