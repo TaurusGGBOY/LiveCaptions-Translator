@@ -363,3 +363,10 @@ MigrationBackup/
 FodyWeavers.xsd
 
 .idea/
+# Local custom build artifacts and credentials
+custom/notion/bin/
+custom/notion/obj/
+custom/notion/artifacts/
+*.job.json
+*.dpapi
+._*
